@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Fall Detection with Alert</title>
+
+  <!-- TensorFlow.js + MoveNet -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.14.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background: #0f1117;
+      font-family: 'Segoe UI', sans-serif;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+
+    #container {
+      position: relative;
+      width: 640px;
+      height: 480px;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.6);
+    }
+
+    video, canvas {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+
+    #statusBox {
+      margin-top: 20px;
+      font-size: 24px;
+      padding: 12px 30px;
+      border-radius: 14px;
+      font-weight: 600;
+      transition: background-color 0.3s;
+    }
+
+    #statusBox.standing {
+      background-color: #27ae60;
+    }
+
+    #statusBox.falling {
+      background-color: #c0392b;
+      animation: pulse 0.5s infinite alternate;
+    }
+
+    @keyframes pulse {
+      from { transform: scale(1); }
+      to { transform: scale(1.05); }
+    }
+
+    #confidence {
+      margin-top: 10px;
+      font-size: 16px;
+      color: #bbb;
+    }
+
+    #resetButton {
+      margin-top: 15px;
+      padding: 10px 20px;
+      background-color: #2980b9;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    #notification {
+      margin-top: 15px;
+      font-size: 16px;
+      color: #f1c40f;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="container">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div id="statusBox" class="standing">🟢 Standing Normally</div>
+  <div id="confidence">Confidence: 0%</div>
+  <button id="resetButton">🔄 Reset</button>
+  <div id="notification">⚠️ Notification Sent: No response in 30s!</div>
+
+  <audio id="alarm" src="https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg" loop></audio>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const statusBox = document.getElementById('statusBox');
+    const confidenceDisplay = document.getElementById('confidence');
+    const alarm = document.getElementById('alarm');
+    const resetButton = document.getElementById('resetButton');
+    const notificationDiv = document.getElementById('notification');
+
+    let detector;
+    let fallConfidence = 0;
+    let lastPoseTime = 0;
+    let isAlarmPlaying = false;
+    let fallDetected = false;
+    let fallTimer = null;
+
+    async function setupCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+        audio: false
+      });
+      video.srcObject = stream;
+      return new Promise(resolve => {
+        video.onloadedmetadata = () => resolve(video);
+      });
+    }
+
+    async function loadModel() {
+      return await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, {
+        modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER
+      });
+    }
+
+    function calculateFallConfidence(pose) {
+      const get = name => pose.keypoints.find(k => k.name === name && k.score > 0.2);
+
+      const nose = get('nose');
+      const leftHip = get('left_hip');
+      const rightHip = get('right_hip');
+      const leftKnee = get('left_knee');
+      const rightKnee = get('right_knee');
+      const leftAnkle = get('left_ankle');
+      const rightAnkle = get('right_ankle');
+      const leftShoulder = get('left_shoulder');
+      const rightShoulder = get('right_shoulder');
+
+      if (!nose || !leftHip || !rightHip || !leftKnee || !rightKnee) return 0;
+
+      const avgHipY = (leftHip.y + rightHip.y) / 2;
+      const avgKneeY = (leftKnee.y + rightKnee.y) / 2;
+      const headToHip = nose.y - avgHipY;
+      const hipToKnee = avgKneeY - avgHipY;
+
+      let confidence = 0;
+      if (headToHip < 0) confidence += 40;
+      if (hipToKnee < 0) confidence += 30;
+
+      if (leftAnkle && rightAnkle) {
+        const avgAnkleY = (leftAnkle.y + rightAnkle.y) / 2;
+        if (avgAnkleY < nose.y) confidence += 20;
+      } else {
+        confidence += 10;
+      }
+
+      if (leftShoulder && rightShoulder) {
+        const shoulderDiff = Math.abs(leftShoulder.y - rightShoulder.y);
+        const hipDiff = Math.abs(leftHip.y - rightHip.y);
+        if (shoulderDiff > 30 || hipDiff > 30) confidence += 10;
+      }
+
+      return Math.min(confidence, 100);
+    }
+
+    function smoothFallConfidence(newVal) {
+      const alpha = 0.3;
+      fallConfidence = fallConfidence * (1 - alpha) + newVal * alpha;
+      return fallConfidence;
+    }
+
+    function triggerFallDetected() {
+      fallDetected = true;
+      statusBox.textContent = "🔴 Fall Detected! Awaiting Reset...";
+      statusBox.className = "falling";
+      confidenceDisplay.textContent = "Confidence: 100%";
+
+      if (!isAlarmPlaying) {
+        alarm.play();
+        isAlarmPlaying = true;
+      }
+
+      // Start 30-second notification timer
+      fallTimer = setTimeout(() => {
+        notificationDiv.style.display = 'block';
+        console.log("📢 Notify device: Fall detected and no reset in 30 seconds.");
+      }, 30000);
+    }
+
+    function resetFallDetection() {
+      fallDetected = false;
+      fallConfidence = 0;
+      statusBox.textContent = "🟢 Standing Normally";
+      statusBox.className = "standing";
+      confidenceDisplay.textContent = "Confidence: 0%";
+      notificationDiv.style.display = "none";
+
+      alarm.pause();
+      isAlarmPlaying = false;
+
+      if (fallTimer) clearTimeout(fallTimer);
+    }
+
+    async function detect() {
+      const poses = await detector.estimatePoses(video);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (poses.length > 0 && !fallDetected) {
+        lastPoseTime = Date.now();
+        const pose = poses[0];
+
+        for (const kp of pose.keypoints) {
+          if (kp.score > 0.2) {
+            ctx.beginPath();
+            ctx.arc(kp.x, kp.y, 4, 0, 2 * Math.PI);
+            ctx.fillStyle = kp.score > 0.5 ? "cyan" : "yellow";
+            ctx.fill();
+          }
+        }
+
+        const rawConf = calculateFallConfidence(pose);
+        const smoothConf = smoothFallConfidence(rawConf);
+        confidenceDisplay.textContent = `Confidence: ${Math.round(smoothConf)}%`;
+
+        if (smoothConf > 60) {
+          triggerFallDetected();
+        } else {
+          statusBox.textContent = "🟢 Standing Normally";
+          statusBox.className = "standing";
+        }
+      }
+
+      requestAnimationFrame(detect);
+    }
+
+    resetButton.addEventListener("click", resetFallDetection);
+
+    async function main() {
+      await setupCamera();
+      detector = await loadModel();
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      detect();
+    }
+
+    main();
+  </script>
+</body>
+</html>
