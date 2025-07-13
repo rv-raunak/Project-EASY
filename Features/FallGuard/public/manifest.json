@@ -1,0 +1,25 @@
+{
+  "name": "Fall Detection App",
+  "short_name": "FallDetect",
+  "description": "Mobile fall detection app with device motion sensors",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F2F2F7",
+  "theme_color": "#007AFF",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ],
+  "categories": ["utilities", "security"],
+  "shortcuts": [
+    {
+      "name": "Start Monitoring",
+      "url": "/?action=start",
+      "description": "Quickly start fall detection monitoring"
+    }
+  ]
+}
